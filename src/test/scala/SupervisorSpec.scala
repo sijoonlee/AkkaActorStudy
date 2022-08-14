@@ -1,6 +1,6 @@
 import akka.actor.SupervisorStrategy.{Escalate, Restart, Resume, Stop}
-import akka.actor.{Actor, ActorLogging, ActorRef, ActorSystem, OneForOneStrategy, Props, Terminated}
-import akka.testkit.{ImplicitSender, TestKit}
+import akka.actor.{Actor, ActorLogging, ActorRef, ActorSystem, AllForOneStrategy, OneForOneStrategy, Props, SupervisorStrategy, Terminated}
+import akka.testkit.{EventFilter, ImplicitSender, TestKit}
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.wordspec.AnyWordSpecLike
 
@@ -60,11 +60,49 @@ class SupervisorSpec extends TestKit(ActorSystem("SupervisorSpec"))
       assert(terminatedMessage.actor == child)
     }
   }
+
+  "kinder supervisor" should {
+    "not kill on restart or on escalate" in {
+      val supervisor = system.actorOf(Props[NoDeathOnRestartSupervisor])
+      supervisor ! Props[FussyWordCounter]
+      val child = expectMsgType[ActorRef]
+      child ! "A"
+      child ! "" // restart
+      child ! Report
+      expectMsg(0)
+      child ! 1 // escalate
+      child ! Report
+      expectMsg(0)
+    }
+  }
+
+  "all-for-one supervisor" should {
+    "apply the all-for-one strategy" in {
+      val supervisor = system.actorOf(Props[AllForOneSuperVisor])
+      supervisor ! Props[FussyWordCounter]
+      val firstChild = expectMsgType[ActorRef]
+
+      supervisor ! Props[FussyWordCounter]
+      val secondChild = expectMsgType[ActorRef]
+      secondChild ! "My testing"
+      secondChild ! Report
+      expectMsg(2)
+
+      EventFilter[NullPointerException]() intercept {
+        firstChild ! "" // this will make the second child restart
+      }
+
+      Thread.sleep(500)
+
+      secondChild ! Report
+      expectMsg(0) // 0 because it restarted
+    }
+  }
 }
 
 object SupervisorSpec {
   class Supervisor extends Actor with ActorLogging {
-    override val supervisorStrategy = OneForOneStrategy() {
+    override val supervisorStrategy: SupervisorStrategy = OneForOneStrategy() {
       case _: NullPointerException => log.info("Restart"); Restart
       case _: IllegalArgumentException => log.info("Stop"); Stop
       case _: RuntimeException => log.info("Resume"); Resume
@@ -77,6 +115,30 @@ object SupervisorSpec {
         sender() ! childRef
     }
   }
+
+  class NoDeathOnRestartSupervisor extends Supervisor {
+    // original method
+    //    def preRestart(@unused reason: Throwable, @unused message: Option[Any]): Unit = {
+    //      context.children.foreach { child =>
+    //        context.unwatch(child)
+    //        context.stop(child)
+    //      }
+    //      postStop()
+    //    }
+    override def preRestart(reason: Throwable, message: Option[Any]): Unit = {
+      // empty
+    }
+  }
+
+  class AllForOneSuperVisor extends Supervisor {
+    override val supervisorStrategy = AllForOneStrategy() {
+      case _: NullPointerException => log.info("Restart"); Restart
+      case _: IllegalArgumentException => log.info("Stop"); Stop
+      case _: RuntimeException => log.info("Resume"); Resume
+      case _: Exception => log.info("Escalate"); Escalate // throw
+    }
+  }
+
 
   case object Report
   class FussyWordCounter extends Actor with ActorLogging {
